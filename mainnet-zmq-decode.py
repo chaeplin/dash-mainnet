@@ -13,7 +13,9 @@ import time
 import re
 from decimal import Decimal
 from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
+from collections import deque
 import datetime
+
 
 # address / key
 _base58_codestring = b'123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -281,10 +283,9 @@ def decoderawtx(rawtx):
     txo  = deserialize(rawtx)
     txid = format_hash(double_sha256(binascii.unhexlify(rawtx)))
 
-    #print(txid)
-    #print(json.dumps(txo, sort_keys=True, indent=4, separators=(',', ': ')))
-
     addrcheck = {}
+    addrfromall = []
+
     for x in txo.get('ins'):
         hashn = x.get('outpoint')['hash']
         if hashn != '0000000000000000000000000000000000000000000000000000000000000000':
@@ -298,17 +299,21 @@ def decoderawtx(rawtx):
                     "hashin":   hashn + '-' + str(x.get('outpoint')['index']),
                     "addrfrom": addrn
                 }
+                addrfromall.append(addrn)
 
             elif (addrn == 'pay_to_pubkey'):
                 addrcheck['pubkey'] = {
                     "hashin":   hashn + '-' + str(x.get('outpoint')['index']),
-                    "addrfrom": addrn
+                    "addrfrom": 'pay_to_pubkey'
                 }
+                addrfromall.append('pay_to_pubkey')
+
         else:
             addrcheck['coinbase'] = {
                     "hashin":   '0000000000000000000000000000000000000000000000000000000000000000' + '-' + str(0),
                     "addrfrom": 'coinbase'
             }
+            addrfromall.append('coinbase')
 
     if addrcheck.get('coinbase', None) != None:
         hashin   = addrcheck.get('coinbase')['hashin']
@@ -322,8 +327,6 @@ def decoderawtx(rawtx):
         hashin   = addrcheck.get('good')['hashin']
         addrfrom = addrcheck.get('good')['addrfrom']
 
-    #print(json.dumps(addrcheck, sort_keys=True, indent=4, separators=(',', ': ')))
-
     addrval = {}
 
     for x in txo.get('outs'):
@@ -335,9 +338,9 @@ def decoderawtx(rawtx):
 
         hashout = txid + '-' + str(outno)
 
-        #print(hashout, addrto, value)
         addrval[addrto] = {
             "from": addrfrom,
+            "fromall": addrfromall,
             "hashin": hashin,
             "txid": hashout,
             "to": addrto,
@@ -472,18 +475,6 @@ def rpcgetinfo():
     except:
         return None
 
-
-def rpc_getrawtransaction(txid):
-    #print('rpc_rawtx: %s' % txid)
-    try:
-        txidjson = access.getrawtransaction(txid, 1)
-        return(txidjson)
-        #print(json.dumps(txidjson, sort_keys=True, indent=4, separators=(',', ': ')))
-
-    except Exception as e:
-        print(e.args[0])
-        pass
-
 def now():
     return int(time.time())
 
@@ -508,20 +499,20 @@ while(not checksynced()):
 
 blockcount = rpcgetinfo()
 
-
-
 # zmq
 zmqContext = zmq.Context()
 zmqSubSocket = zmqContext.socket(zmq.SUB)
-zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashblock")
-zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashtx")
-zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashtxlock")
+#zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashblock")
+#zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashtx")
+#zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"hashtxlock")
 zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawblock")
 zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawtx")
-zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawtxlock")
+#zmqSubSocket.setsockopt(zmq.SUBSCRIBE, b"rawtxlock")
 zmqSubSocket.connect("tcp://127.0.0.1:%i" % port)
 
 current_sequence = 0
+
+q = deque(maxlen=10000)
 
 try:
     while True:
@@ -539,35 +530,20 @@ try:
 
         if topic == 'rawtx':
             x = decoderawtx(body)
-            for y in x:
-                v = float(Decimal(x[y]['value']))
-            #    if v >= 100:
-            #    print(Decimal(x[y]['value']))
-                print('{} {} {} {:16.8f}'.format(ts, x[y].get('from'), y, v))
-            #print(json.dumps(x, sort_keys=True, indent=4, separators=(',', ': ')))
-        
-#        if topic == 'hashtx':
-#            a = rpc_getrawtransaction(body)
-#            for m in a['vin']:
-#                print('\t\trpc from : %s' % m['address'])
-#                #print(json.dumps(m, sort_keys=True, indent=4, separators=(',', ': ')))
-#
-#            for n in a['vout']:
-#                print('\t\trpc to : %s %s' % (n['scriptPubKey']['addresses'][0], n['value']))
-#                #print(json.dumps(n, sort_keys=True, indent=4, separators=(',', ': ')))
+            txid = format_hash(double_sha256(binascii.unhexlify(body)))
+            if txid not in q:
+                q.append(txid)
+                for y in x:
+                    v = float(Decimal(x[y]['value']))
+                    print('{} {:34} {:3d} {:34} {:16.8f}'.format(ts, x[y].get('from'), len(x[y].get('fromall')), y, v))
+            #else:
+            #   print('dup !')
 
         if topic == 'rawblock':
-            #print('--> ', blockcount + 1, '---> ', sequence)
             x = decoderawblock(body)
             print('{} {} {}'.format(ts, blockcount + 1, x['hash']))
-            #print(x['hash'])
-            #print(json.dumps(x, sort_keys=True, indent=4, separators=(',', ': ')))
             blockcount = blockcount + 1
 
-
-#except Exception as e:
-#    print(e.args[0])
-#    sys.exit()
 
 except KeyboardInterrupt:
     sys.exit()
